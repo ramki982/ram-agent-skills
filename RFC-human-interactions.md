@@ -3,6 +3,7 @@
 **Author:** Ramakrishnan Meenakshi Sundaram ([@ramki982](https://github.com/ramki982))  
 **Status:** Draft  
 **Created:** 2026-06-01  
+**Revised:** 2026-06-23  
 **Repo:** [agentskills/agentskills](https://github.com/agentskills/agentskills)
 
 ---
@@ -52,6 +53,8 @@ This design directly addresses the context bloat problem seen in large tool ecos
 
 **Declarative, not prescriptive.** The skill declares *what* to collect and *when*. The tool decides *how* to render it. A rich form widget in Claude.ai, numbered prompts in a terminal, a chat card in Copilot — same schema, different presentation. Skill authors don't write UI; they write intent.
 
+**Assertive defaults, flexible overrides.** The spec defines sensible defaults for all optional fields so skills work correctly out of the box. Skill authors override only when their workflow requires it. Tool implementors fill in runtime-bound fields (digests, tokens, timestamps) that skill authors cannot know at authoring time.
+
 **Backward-compatible.** The field is fully optional. All existing skills continue to work unchanged. Tools that don't recognise `human-interactions` ignore it gracefully and fall back to freeform text questions as today.
 
 **Progressive disclosure by design.** The `human-interactions: true` signal in frontmatter loads at startup alongside `name` and `description` — 2 tokens, not 200. The full `references/INTERACTIONS.md` schema loads only on skill activation, consistent with how the spec already handles `scripts/` and `references/`. Tools can pre-render a `before-start` form as the very first thing on activation, before the skill body runs.
@@ -72,9 +75,25 @@ human-interactions: true
 
 No other frontmatter changes are required. This signal tells tools to load `references/INTERACTIONS.md` on skill activation.
 
+### `references/INTERACTIONS.md` — purpose and format
+
+`references/INTERACTIONS.md` is a normative spec fragment — a YAML document defining when and how a skill collects structured human input. It is loaded by the tool on skill activation, not at startup. The file contains a single top-level array of interaction blocks. Each block declares a trigger, a set of fields, and optional behaviour on skip. Tools that do not recognise this file should degrade gracefully to freeform text collection using the `title`, `description`, and `fields[].label` values as guidance.
+
+**Schema version:** `1.0-draft`
+
+### Two distinct interaction classes
+
+This spec recognises two architecturally distinct classes of human interaction:
+
+**Input collection** — `before-start`, `on-phase`, `on-demand` — gather context, review, or guidance from the human. A human approving an input-collection checkpoint means "I have reviewed this and the workflow may continue." It does **not** authorize any specific subsequent action.
+
+**Authorization** — `on-confirmation` — binds a human decision to one exact, identified action envelope before it executes. A phase approval must never implicitly cascade into action authorization. Even if a human approved a phase gate, the tool must still seek a fresh `confirmation_record` at the point of the irreversible action.
+
+This boundary is normative. Tools must treat it as such.
+
 ### `references/INTERACTIONS.md` schema
 
-This file contains a YAML document — an array of **interaction blocks**. Each block has the following keys:
+Each interaction block has the following keys:
 
 | Key | Required | Description |
 |-----|----------|-------------|
@@ -83,19 +102,78 @@ This file contains a YAML document — an array of **interaction blocks**. Each 
 | `title` | Yes | Short heading shown to the human. Max 80 chars. |
 | `description` | No | Context or instructions for the human. Shown below the title. |
 | `fields` | Yes | Array of input field definitions. At least one required. See [Field types](#field-types). |
-| `phase` | Conditional | Required when `trigger` is `on-phase`. Free-form string matching a phase name used in the skill body (e.g. `after-spec`, `before-implement`). Freeform to accommodate the diversity of phase structures across different skills. |
+| `phase` | Conditional | Required when `trigger` is `on-phase`. Skill-local string matching a phase name used in the skill body (e.g. `after-spec`, `before-implement`). Freeform — skill authors own this namespace. |
+| `phase_kind` | No | Optional classifier for `on-phase` blocks. A small controlled vocabulary the tool uses to render appropriate UI, independent of the skill-local `phase` name. See [Phase kind values](#phase-kind-values). |
 | `on-skip` | No | `abort` (default) or `continue`. Behaviour if the human dismisses or skips the interaction. |
+| `resume` | No | `true` enables the tool to generate a resume contract for this block. See [Resume contract](#resume-contract). Recommended for `before-start` and `on-phase` blocks in long-running workflows. |
+| `confirmation_record` | Conditional | Required when `trigger` is `on-confirmation`. Skill author declares intent fields; tool populates runtime-bound fields. See [Confirmation record](#confirmation-record). |
 
 ### Trigger types
 
-| Trigger | When it fires |
-|---------|---------------|
-| `before-start` | Once, before skill execution begins. Use for required setup context the agent cannot infer. |
-| `on-demand` | The agent decides when to invoke, guided by skill body instructions. The most flexible trigger — suited for inputs that depend on runtime conditions. |
-| `on-confirmation` | Before a destructive, irreversible, or high-stakes action. Requires explicit human approval to proceed. |
-| `on-phase` | At a named phase boundary defined by the skill's workflow. The `phase` key specifies which boundary. |
+| Trigger | Class | When it fires |
+|---------|-------|---------------|
+| `before-start` | Input collection | Once, before skill execution begins. Use for required setup context the agent cannot infer. |
+| `on-demand` | Input collection | The agent decides when to invoke, guided by skill body instructions. The most flexible trigger — suited for inputs that depend on runtime conditions. |
+| `on-phase` | Input collection | At a named phase boundary defined by the skill's workflow. The `phase` key specifies which boundary. Approval here does not authorize subsequent actions. |
+| `on-confirmation` | Authorization | Before a destructive, irreversible, or high-stakes action. Produces a `confirmation_record` binding the human decision to the exact action envelope. |
 
 > **Extensibility note:** This list is intentionally minimal. Future versions of the spec may introduce additional trigger types (e.g. `on-error`, `on-loop-iteration`) in a backward-compatible way. Tools encountering an unrecognised trigger value should treat the interaction as `on-demand`.
+
+### Phase kind values
+
+`phase_kind` is an optional classifier on `on-phase` blocks. It lets tools render appropriate UI without coupling to skill-local phase names. Skill authors set it; tools consume it.
+
+| Value | Meaning |
+|-------|---------|
+| `review_gate` | Human reviews an artifact (spec, plan, report) before the workflow continues. |
+| `pre_side_effect` | Workflow is about to produce an externally visible or durable change. Human confirms readiness. |
+| `checkpoint` | General workflow pause for human awareness or lightweight acknowledgement. |
+| `approval` | Explicit sign-off required before a significant (but not irreversible) next step. |
+
+Tools encountering an unrecognised `phase_kind` should fall back to a generic review UI.
+
+### Confirmation record
+
+`on-confirmation` blocks must include a `confirmation_record` key. This produces a tamper-evident decision record binding the human's approval to one exact action envelope.
+
+**Skill author declares (intent — known at authoring time):**
+
+```yaml
+confirmation_record:
+  proposed_action: <string>      # What action will execute (e.g. git-commit, write-and-commit)
+  target_resource: <string>      # What resource it targets (e.g. current-phase-files, product.md)
+```
+
+**Tool populates at runtime (binding — computed at execution time):**
+
+| Field | Description |
+|-------|-------------|
+| `interaction_id` | Stable identifier for this confirmation event. |
+| `skill_id` | Skill that requested the confirmation. |
+| `skill_version` | Version of the skill at time of confirmation. |
+| `phase` | Current phase when confirmation was requested, if applicable. |
+| `canonical_arguments_digest` | Hash of the exact arguments the action will execute with. If arguments change after confirmation, the old record is invalid. |
+| `decision` | `approve`, `deny`, `revise`, or `timeout`. |
+| `decided_at` | Timestamp of the human decision. |
+| `expires_at` | Default: 30 minutes after confirmation. Stale confirmations must not authorize new actions. |
+| `decision_ref` | Opaque reference exposed to the skill runtime to bind the decision to the action. |
+
+**Defaults:** Tools must apply `expires_at: +30m` unless the skill explicitly overrides. A `timeout` decision must be treated identically to `deny`.
+
+### Resume contract
+
+For `before-start` and `on-phase` blocks where `resume: true` is set, the tool generates a resume contract on completion. This allows long-running workflows to resume cleanly after human input without re-prompting or losing structured state.
+
+**Tool populates at runtime:**
+
+| Field | Description |
+|-------|-------------|
+| `interaction_id` | Identifies which interaction was completed. |
+| `collected_values` | Structured, validated values from all fields in the block. |
+| `resume_token` | Opaque runtime reference the tool can bind to the next execution step. |
+| `expires_at` | Default: 24 hours. Expired resume contracts must not be used to skip re-collection. |
+
+Skill authors set `resume: true` to opt in. The tool handles all runtime fields. No additional skill-side configuration is needed.
 
 ### Field types
 
@@ -148,38 +226,23 @@ options:
 
 **`fallback` is strongly recommended** for all dynamic sources. If source resolution fails (file not found, agent cannot infer), the tool falls back to the static `fallback` array so the interaction can still proceed.
 
-**Examples:**
+---
 
-```yaml
-# Detect tech stack from project files
-- id: tech-stack
-  type: multi-select
-  label: "Detected tech stack — confirm or adjust"
-  options:
-    source: file
-    path: package.json
-    extract: "list of frameworks and runtimes from dependencies and devDependencies"
-    fallback: [React, Vue, Node.js, Python, Go, Java, Other]
+## Acceptance tests
 
-# List pending tracks from the conductor registry
-- id: resume-track
-  type: single-select
-  label: "Which track do you want to resume?"
-  options:
-    source: file
-    path: conductor/tracks.md
-    extract: "track names with status pending or in-progress"
-    fallback: []
+These tests define the minimum conformance bar for tool implementors. A tool that passes all four correctly implements this spec.
 
-# Agent infers affected modules from codebase structure
-- id: affected-modules
-  type: multi-select
-  label: "Which modules does this change affect?"
-  options:
-    source: agent
-    extract: "top-level directories in src/ relevant to the described goal"
-    fallback: []
-```
+**Test 1 — Bait-and-switch prevention** *(contributed by @rpelevin)*  
+A `confirmation_record` approves action A with arguments digest A. If the skill subsequently changes the action, target, or digest before execution, the old confirmation must not authorize the new action. The tool must re-request confirmation.
+
+**Test 2 — Structured denial on skip** *(contributed by @rpelevin)*  
+A human skips or times out on an `on-confirmation` block with `on-skip: abort`. The skill receives a structured `deny`/`timeout` decision, not missing or freeform text. The skill must not proceed.
+
+**Test 3 — Stale checkpoint invalidation** *(contributed by @piyushbag)*  
+A human approves at phase N, but runtime state changes before the tool call executes. The tool must treat the prior confirmation as stale and re-request. The `expires_at` and `canonical_arguments_digest` fields are the mechanism.
+
+**Test 4 — Partial field submission on abort** *(contributed by @piyushbag)*  
+Required fields are missing when an `on-phase` block with `on-skip: abort` is submitted. The skill receives a structured `incomplete` result — not freeform text the skill must parse. The tool must not proceed.
 
 ---
 
@@ -204,23 +267,40 @@ human-interactions: true
 ### `conductor/references/INTERACTIONS.md`
 
 ```yaml
-# Human interaction checkpoints for the conductor skill.
-# Loaded by the tool on skill activation. Not loaded at startup.
+# Conductor — Human Interaction Checkpoints
+# Schema version: 1.0-draft
+#
+# Two interaction classes:
+#   Input collection  — before-start, on-phase, on-demand
+#   Authorization     — on-confirmation (produces confirmation_record)
+#
+# A phase approval does NOT authorize any subsequent action.
 
 - id: project-setup
   trigger: before-start
   title: "Set up your conductor track"
-  description: "A few details before conductor scaffolds your track"
+  description: "A few details so conductor can scaffold your project correctly"
+  on-skip: abort
+  resume: true
   fields:
+    - id: project-type
+      type: single-select
+      label: "What are you starting?"
+      required: true
+      options: [New project (greenfield), Existing project (brownfield)]
     - id: track-type
       type: single-select
-      label: "What are you building?"
+      label: "What kind of work is this track?"
       required: true
-      options: [Feature, Bug fix, Refactor, Spike]
+      options: [Feature, Bug fix, Refactor, Spike, Chore]
     - id: tech-stack
       type: multi-select
-      label: "Tech stack"
-      options: [React, Vue, Node.js, Python, Go, Java, Other]
+      label: "Detected tech stack — confirm or adjust"
+      options:
+        source: file
+        path: package.json
+        extract: "list of frameworks and runtimes from dependencies and devDependencies"
+        fallback: [React, Vue, Angular, Node.js, Python, Go, Java, Ruby, Other]
     - id: scope-notes
       type: textarea
       label: "Describe the goal"
@@ -234,35 +314,76 @@ human-interactions: true
 - id: spec-review
   trigger: on-phase
   phase: after-spec
+  phase_kind: review_gate
   title: "Review the spec before planning"
-  description: "Conductor has generated spec.md — review it and confirm before the plan is built"
+  description: "Conductor has drafted spec.md — review it and confirm before the implementation plan is built"
   on-skip: abort
+  resume: true
   fields:
     - id: spec-approved
       type: confirm
       label: "Spec looks good — proceed to implementation plan?"
       required: true
 
-- id: scope-clarification
-  trigger: on-demand
-  title: "Scope clarification needed"
-  description: "The agent has reached a decision point that requires your input"
-  on-skip: continue
+- id: plan-review
+  trigger: on-phase
+  phase: after-plan
+  phase_kind: review_gate
+  title: "Review the implementation plan"
+  description: "Conductor has drafted plan.md — review it and confirm before execution starts"
+  on-skip: abort
+  resume: true
   fields:
-    - id: clarification-response
-      type: textarea
-      label: "Your answer"
+    - id: plan-approved
+      type: confirm
+      label: "Plan looks good — begin implementation?"
       required: true
 
-- id: commit-confirm
+- id: scope-clarification
+  trigger: on-demand
+  title: "Clarification needed"
+  description: "The agent has reached a decision point that requires your input before proceeding"
+  on-skip: continue
+  fields:
+    - id: affected-modules
+      type: multi-select
+      label: "Which modules does this change affect?"
+      options:
+        source: agent
+        extract: "top-level directories in src/ relevant to the described goal"
+        fallback: []
+    - id: clarification-response
+      type: textarea
+      label: "Additional context or guidance"
+      required: true
+      placeholder: "Provide guidance so conductor can proceed..."
+
+- id: phase-commit-confirm
   trigger: on-confirmation
-  title: "Manual verification — ready to commit?"
+  title: "Manual verification — ready to commit this phase?"
   description: "Run the app and verify this phase works as expected before committing"
   on-skip: abort
+  confirmation_record:
+    proposed_action: git-commit
+    target_resource: current-phase-files
   fields:
     - id: verification-passed
       type: confirm
       label: "Manual verification passed. Commit this phase and continue?"
+      required: true
+
+- id: docs-sync-confirm
+  trigger: on-confirmation
+  title: "Approve documentation sync"
+  description: "Conductor has drafted edits to product.md, tech-stack.md, and product-guidelines.md"
+  on-skip: continue
+  confirmation_record:
+    proposed_action: write-and-commit
+    target_resource: "product.md, tech-stack.md, product-guidelines.md"
+  fields:
+    - id: docs-approved
+      type: confirm
+      label: "Documentation changes look correct — write and commit?"
       required: true
 ```
 
@@ -272,17 +393,19 @@ human-interactions: true
 
 This RFC defines the schema. It does not mandate a specific UI. The following guidance is non-normative.
 
-**Loading:** On skill activation, tools check for `human-interactions: true` in the frontmatter. If present, load `references/INTERACTIONS.md` before executing the skill body. This file is not loaded at startup — only on activation.
+**Loading:** On skill activation, tools check for `human-interactions: true` in the frontmatter. If present, load `references/INTERACTIONS.md` before executing the skill body.
 
 **`before-start` interactions** should be presented to the human immediately on activation, before the skill body is loaded into agent context, so the agent starts execution with all required values already available.
 
 **Rendering:** Tools should render each interaction block as a native experience appropriate to their environment. Claude.ai might show a structured form panel. Claude Code might prompt sequentially in the terminal. Copilot might render a chat card. The human experience should feel native to the tool — not generic.
 
-**`on-phase` interactions** should be triggered when the agent determines it has completed the named phase. The skill body instructions should make phase boundaries explicit.
+**`on-phase` interactions** should be triggered when the agent determines it has completed the named phase. The skill body instructions should make phase boundaries explicit. The `phase_kind` classifier, when present, should inform the tool's rendering choice independently of the `phase` string.
 
 **`on-demand` interactions** are agent-initiated. The skill body should include instructions telling the agent when to invoke the interaction by its `id`.
 
-**`on-confirmation` interactions** must block execution until the human explicitly approves. An `on-skip: abort` confirmation should halt the skill cleanly, not silently continue.
+**`on-confirmation` interactions** must block execution until the human explicitly approves. The tool must compute and bind the `confirmation_record` runtime fields before presenting the confirmation to the human. If arguments change after confirmation is granted, the tool must re-request. An `on-skip: abort` confirmation must halt the skill cleanly with a structured `deny` result — not silently continue.
+
+**Resume contracts:** When `resume: true` is set on a block, the tool generates the resume contract on completion and makes `collected_values` and `resume_token` available to the runtime for the next step. Expired contracts (`expires_at` exceeded) must not be used to bypass re-collection.
 
 **Graceful degradation:** If a tool does not support `human-interactions`, the agent should fall back to asking freeform questions in natural language, using the `title`, `description`, and `fields[].label` values as guidance.
 
@@ -296,6 +419,7 @@ This RFC defines the schema. It does not mandate a specific UI. The following gu
 - **Conditional field logic** (show field B only if field A is "yes") — deferred to a future version
 - **Multi-step wizard flows within a single interaction** — deferred
 - **Validation rules beyond `required`** — deferred
+- **`script` dynamic option sources** — reserved pending sandboxed execution security resolution
 
 These are left out to keep the initial proposal minimal and achievable. The goal is to solve 80% of cases cleanly, not to build a form framework.
 
@@ -309,11 +433,13 @@ These are left out to keep the initial proposal minimal and achievable. The goal
 
 **A fully-featured form DSL** — Conditional logic, multi-step wizards, validation expressions. More powerful, but significantly increases implementation burden for tool authors and skill authors alike. Starting minimal gives the ecosystem time to align before adding complexity.
 
+**Single unified interaction class** — Treating `on-confirmation` as just another input-collection trigger. Rejected because authorization binding has fundamentally different runtime requirements: tamper-evidence, expiry, digest binding. Conflating the two classes creates a spec that is underspecified for the cases where it matters most.
+
 ---
 
 ## Open questions
 
-1. Should `on-phase` phase names be freeform strings (current proposal) or should the spec define a base vocabulary (e.g. `after-spec`, `after-plan`, `after-implement`) that skills can extend? Freeform is more flexible; a base vocabulary improves interoperability.
+1. ~~Should `on-phase` phase names be freeform strings or should the spec define a base vocabulary?~~ **Resolved:** Phase names are skill-local freeform strings. The optional `phase_kind` classifier provides the interoperability layer with a small controlled vocabulary. Credit: @rpelevin.
 
 2. Should tools be required to expose collected values to the agent by structured reference (`project-setup.track-type`) or is it sufficient to inject them as natural language context? Structured references enable more precise skill body instructions.
 
@@ -323,10 +449,15 @@ These are left out to keep the initial proposal minimal and achievable. The goal
 
 ## Reference implementation
 
-A working example of this schema applied to the `conductor` skill is available in the [`ram-agent-skills`](https://github.com/ramki982/ram-agent-skills) repository. The `conductor` skill there has been updated to use `human-interactions` as a proof of concept.
+A working example of this schema applied to the `conductor` skill is available in the [`ram-agent-skills`](https://github.com/ramki982/ram-agent-skills) repository on the [`human-interactions-rfc`](https://github.com/ramki982/ram-agent-skills/tree/human-interactions-rfc) branch. The `conductor` skill there has been updated to use `human-interactions` as a proof of concept.
 
 ---
 
 ## Acknowledgements
 
 This proposal builds on the work of the [Agent Skills](https://agentskills.io) team at Anthropic, Matt Pocock's agentic skills patterns, and the Google Conductor workflow. Thanks to the growing community of skill authors whose real-world usage made this gap visible.
+
+Community inputs that shaped this revision:
+- **@rpelevin** — input-collection vs authorization distinction, `confirmation_record` sub-schema, `phase_kind` classifier, phase/confirmation boundary, acceptance tests 1 and 2
+- **@piyushbag** — production workflow validation across hardware validation ops domain, resume contract, acceptance tests 3 and 4, offer to co-author reference INTERACTIONS.md
+- **@OutlawAndy** — normative intro for INTERACTIONS.md

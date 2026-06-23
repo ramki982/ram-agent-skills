@@ -16,6 +16,7 @@
   title: "Tell me about your task"
   description: "This context shapes everything the skill does — take 30 seconds to fill it in"
   on-skip: abort           # can't proceed without this context
+  resume: true             # tool generates resume contract so long-running workflows don't re-prompt
 
   fields:
     # FIELD TYPE: text — single-line free input
@@ -69,10 +70,14 @@
 # ─────────────────────────────────────────────
 - id: phase-checkpoint
   trigger: on-phase
-  phase: after-first-phase    # matches the phase name used in SKILL.md
+  phase: after-first-phase    # skill-local name — matches whatever the skill body uses
+  phase_kind: review_gate     # tool-facing classifier — tells the tool how to render this gate
   title: "Phase complete — review before continuing"
   description: "The first phase has finished. Review the output before the next phase begins."
   on-skip: abort
+  resume: true                # tool generates resume contract on completion
+  # NOTE: approving this gate does NOT authorize any subsequent action.
+  # If the next step is irreversible, an on-confirmation block must be invoked separately.
 
   fields:
     # FIELD TYPE: confirm — yes/no gate
@@ -125,6 +130,12 @@
   title: "Ready to apply changes?"
   description: "This will write changes to your codebase. Review the proposed diff before confirming."
   on-skip: abort              # destructive action — must never proceed without approval
+  confirmation_record:
+    proposed_action: write-changes   # skill author declares intent
+    target_resource: codebase        # tool binds digest, expiry, decision at runtime
+  # Tool populates at runtime: interaction_id, canonical_arguments_digest,
+  # decision, decided_at, expires_at (+30m default), decision_ref.
+  # If arguments change after confirmation, the old record is invalid — tool must re-request.
 
   fields:
     - id: confirmed

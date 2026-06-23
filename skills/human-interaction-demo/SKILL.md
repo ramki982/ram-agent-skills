@@ -26,16 +26,21 @@ Read `references/INTERACTIONS.md` alongside this file to see how the schema maps
 
 | Feature | Where shown |
 |---------|-------------|
-| `trigger: before-start` | Step 1 — collected before anything runs |
-| `trigger: on-phase` | Step 2 — fires at a named phase boundary |
-| `trigger: on-demand` | Step 3 — agent decides when to invoke |
-| `trigger: on-confirmation` | Step 4 — blocks on explicit human approval |
+| `trigger: before-start` | Step 1 — input collection before anything runs |
+| `trigger: on-phase` | Step 2 — input collection at a named phase boundary |
+| `trigger: on-demand` | Step 3 — agent-initiated input collection |
+| `trigger: on-confirmation` | Step 4 — authorization gate before irreversible action |
+| `phase_kind: review_gate` | `phase-checkpoint` — tool-facing classifier for rendering |
+| `resume: true` | `gather-context`, `phase-checkpoint` — resume contract for long-running flows |
+| `confirmation_record` | `final-confirm` — tamper-evident binding to exact action envelope |
 | Static `options` array | `preferences` field in `gather-context` |
 | `options.source: file` | `existing-items` field in `gather-context` |
 | `options.source: agent` | `affected-areas` field in `mid-task-check` |
 | `on-skip: abort` | `final-confirm` — halts if skipped |
 | `on-skip: continue` | `mid-task-check` — proceeds if skipped |
 | `fallback` on dynamic options | All dynamic fields include a fallback |
+
+> **Two interaction classes:** Steps 1–3 are *input collection* — they gather context or review. Step 4 is *authorization* — it binds a human decision to one exact action envelope. Approving step 2 does **not** authorize step 4. Each authorization requires its own explicit confirmation.
 
 ---
 
@@ -64,6 +69,8 @@ Because `on-skip: continue`, the agent proceeds with its best guess if the human
 **Invoke interaction `final-confirm`** (`trigger: on-confirmation`)
 
 Always invoke this before writing, deleting, or committing anything. Because `on-skip: abort`, skipping halts execution cleanly — never silently continues.
+
+The tool generates a `confirmation_record` binding the human's decision to the exact action and arguments at that moment. If anything changes before the action executes, the record is invalid and confirmation must be re-requested.
 
 ---
 
